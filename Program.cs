@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Buffers;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using BenchmarkDotNet.Attributes;
@@ -35,14 +36,25 @@ namespace PerfForFunz
 
     class Program
     {
-        static void Main(string[] args)
+        unsafe static void Main(string[] args)
         {
+            // var str = "hello world";
+            // fixed (char* hptr = str)
+            // {
+            //     var bytePtr = (byte*)hptr;
+            //     var byteCount = UnicodeEncoding.Unicode.GetByteCount(hptr, str.Length);
+            //     for (var i = 0; i < byteCount; i++)
+            //     {
+            //         Console.Write($"'{bytePtr[i]}', ");
+            //     }
+            // }
+
             // var base64Encoder = new Base64Encoder('+', '/', '=');
-            // Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode(new string('a', 1024 * 1024))));
             // Console.WriteLine(base64Encoder.Encode("hello world"));
             // Console.WriteLine(base64Encoder.Encode("aaa"));
             // Console.WriteLine(base64Encoder.Encode("aaaa"));
             // Console.WriteLine(base64Encoder.Encode("aaaaa"));
+            // Console.WriteLine(base64Encoder.Encode(new string('a', 2048)));
 
             // var base64UrlEncoder = new Base64Encoder('-', '_');
             // Console.WriteLine(base64UrlEncoder.Encode("hello world"));
@@ -67,7 +79,6 @@ namespace PerfForFunz
         private readonly byte[] _values;
         private readonly byte _padding;
         private static readonly ArrayPool<byte> _bytePool = ArrayPool<byte>.Shared;
-        private static readonly ArrayPool<byte> _targetBytePool = ArrayPool<byte>.Create(2 * 1024 * 1024, 20);
 
         public Base64Encoder(char character62, char character63, char padding = default(char))
         {
@@ -77,6 +88,7 @@ namespace PerfForFunz
             _characters = string.Concat(alphabet, alphabet, alphabet, alphabet).Select(c => (byte)c).ToArray();
 
             _values = new byte[128];
+
             for (var i = 0; i < alphabet.Length; i++)
             {
                 _values[alphabet[i]] = (byte)i;
@@ -85,7 +97,7 @@ namespace PerfForFunz
             _padding = (byte)padding;
         }
 
-        public string Encode(string data)
+        public unsafe string Encode(string data)
         {
             var sourceLength = Encoding.UTF8.GetByteCount(data);
             if (sourceLength < 1024)
@@ -98,33 +110,35 @@ namespace PerfForFunz
                 return final;
             }
 
-            var targetBuffer = _targetBytePool.Rent(GetTargetLength(sourceLength));
-            var remainingBytes = sourceLength;
-            var blockBuffer = _bytePool.Rent(1024);
-            var dataIndex = 0;
-            var blockLength = 0;
-            var blockLeftOvers = 0;
-            var targetIndex = 0;
-            while (remainingBytes > 1024)
+            var result = new string('\0', GetTargetLength(sourceLength));
+            fixed (char* resultBuffer = result)
             {
+                var targetBuffer = (byte*)resultBuffer;
+                var remainingBytes = sourceLength;
+                var blockBuffer = _bytePool.Rent(1024);
+                var dataIndex = 0;
+                var blockLength = 0;
+                var blockLeftOvers = 0;
+                var targetIndex = 0;
+                while (remainingBytes > 1024)
+                {
+                    Array.Copy(blockBuffer, blockBuffer.Length - blockLeftOvers - 1, blockBuffer, 0, blockLeftOvers);
+                    (dataIndex, blockLength) = GetNextBlock(blockBuffer, data, dataIndex, blockLeftOvers);
+                    blockLeftOvers = blockLength % 3;
+                    var transformLength = blockLength - blockLeftOvers;
+                    EncodeBlock(blockBuffer, 0, transformLength, targetBuffer, targetIndex);
+                    targetIndex = targetIndex + ((transformLength / 3 * 4) * 2);
+                    remainingBytes = remainingBytes - transformLength;
+                }
+
                 Array.Copy(blockBuffer, blockBuffer.Length - blockLeftOvers - 1, blockBuffer, 0, blockLeftOvers);
-                (dataIndex, blockLength) = GetNextBlock(blockBuffer, data, dataIndex, blockLeftOvers);
-                blockLeftOvers = blockLength % 3;
-                var transformLength = blockLength - blockLeftOvers;
-                EncodeBlock(blockBuffer, 0, transformLength, targetBuffer, targetIndex);
-                targetIndex = targetIndex + transformLength;
-                remainingBytes = remainingBytes - transformLength;
+                var finalBytes = Encoding.UTF8.GetBytes(data, dataIndex, data.Length - dataIndex, blockBuffer, blockLeftOvers);
+                EncodeFinal(blockBuffer, 0, finalBytes + blockLeftOvers, targetBuffer, targetIndex);
+
+                _bytePool.Return(blockBuffer);
+
+                return result;
             }
-
-            Array.Copy(blockBuffer, blockBuffer.Length - blockLeftOvers - 1, blockBuffer, 0, blockLeftOvers);
-            var finalBytes = Encoding.UTF8.GetBytes(data, dataIndex, data.Length - dataIndex, blockBuffer, blockLeftOvers);
-            EncodeFinal(blockBuffer, 0, finalBytes + blockLeftOvers, targetBuffer, targetIndex);
-
-            var result = Encoding.UTF8.GetString(targetBuffer, 0, GetTargetLength(sourceLength));
-            _bytePool.Return(blockBuffer);
-            _targetBytePool.Return(targetBuffer);
-
-            return result;
         }
 
         private (int dataIndex, int blockLength) GetNextBlock(byte[] buffer, string data, int index, int blockStart)
@@ -141,6 +155,7 @@ namespace PerfForFunz
                 }
                 else
                 {
+                    count = Encoding.UTF8.GetBytes(data, index, ptrIndex - index, buffer, blockStart) + blockStart;
                     return (ptrIndex, count);
                 }
             }
@@ -166,62 +181,67 @@ namespace PerfForFunz
             return targetLength;
         }
 
-        public string Encode(byte[] sourceBuffer, int length)
+        public unsafe string Encode(byte[] sourceBuffer, int length)
         {
             var targetLength = GetTargetLength(length);
 
-            var targetBuffer = _targetBytePool.Rent(targetLength);
-
-            EncodeFinal(sourceBuffer, 0, length, targetBuffer, 0);
-
-            var result = Encoding.UTF8.GetString(targetBuffer, 0, targetLength);
-            _targetBytePool.Return(targetBuffer);
+            var result = new string('\0', targetLength);
+            fixed (char* targetBuffer = result)
+            {
+                EncodeFinal(sourceBuffer, 0, length, (byte*)targetBuffer, 0);
+            }
 
             return result;
         }
 
-        private void EncodeFinal(byte[] sourceBuffer, int start, int length, byte[] targetBuffer, int targetStart)
+        private unsafe void EncodeFinal(byte[] sourceBuffer, int start, int length, byte* targetBuffer, int targetStart)
         {
             var remainingBytes = length % 3;
             var fullByteLength = length - length % 3;
 
             EncodeBlock(sourceBuffer, start, fullByteLength, targetBuffer, targetStart);
 
-            var targetFinalIndex = targetStart + fullByteLength / 3 * 4;
+            var targetFinalIndex = targetStart + (fullByteLength / 3) * 8;
             var sourceFinalIndex = start + fullByteLength;
             if (remainingBytes == 1)
             {
                 targetBuffer[targetFinalIndex] = _characters[(byte)(sourceBuffer[sourceFinalIndex] >> 2)];
-                targetBuffer[targetFinalIndex + 1] = _characters[(byte)(sourceBuffer[sourceFinalIndex] << 4)];
+                targetBuffer[targetFinalIndex + 2] = _characters[(byte)(sourceBuffer[sourceFinalIndex] << 4)];
 
                 if (_padding != default(char))
                 {
-                    targetBuffer[targetFinalIndex + 2] = _padding;
-                    targetBuffer[targetFinalIndex + 3] = _padding;
+                    targetBuffer[targetFinalIndex + 4] = _padding;
+                    targetBuffer[targetFinalIndex + 6] = _padding;
                 }
             }
 
             if (remainingBytes == 2)
             {
                 targetBuffer[targetFinalIndex] = _characters[(byte)(sourceBuffer[sourceFinalIndex] >> 2)];
-                targetBuffer[targetFinalIndex + 1] = _characters[(byte)(sourceBuffer[sourceFinalIndex] << 4) | (byte)(sourceBuffer[sourceFinalIndex + 1] >> 4)];
-                targetBuffer[targetFinalIndex + 2] = _characters[(byte)(sourceBuffer[sourceFinalIndex + 1] << 2)];
+                targetBuffer[targetFinalIndex + 2] = _characters[(byte)(sourceBuffer[sourceFinalIndex] << 4) | (byte)(sourceBuffer[sourceFinalIndex + 1] >> 4)];
+                targetBuffer[targetFinalIndex + 4] = _characters[(byte)(sourceBuffer[sourceFinalIndex + 1] << 2)];
 
                 if (_padding != default(char))
                 {
-                    targetBuffer[targetFinalIndex + 3] = _padding;
+                    targetBuffer[targetFinalIndex + 6] = _padding;
                 }
             }
         }
 
-        private void EncodeBlock(byte[] sourceBuffer, int start, int length, byte[] targetBuffer, int targetStart)
+        private unsafe void EncodeBlock(byte[] sourceBuffer, int start, int length, byte* targetBuffer, int targetStart)
         {
-            for (int i = start, j = targetStart; i < length; i = i + 3, j = j + 4)
+            var target = targetBuffer + targetStart;
+            Debug.Assert(target[0] == 0);
+            fixed (byte* sourceFixed = sourceBuffer)
             {
-                targetBuffer[j] = _characters[(byte)(sourceBuffer[i] >> 2)];
-                targetBuffer[j + 1] = _characters[(byte)(sourceBuffer[i] << 4) | (byte)(sourceBuffer[i + 1] >> 4)];
-                targetBuffer[j + 2] = _characters[(byte)(sourceBuffer[i + 1] << 2) | (byte)(sourceBuffer[i + 2] >> 6)];
-                targetBuffer[j + 3] = _characters[(byte)sourceBuffer[i + 2]];
+                var source = sourceFixed + start;
+                for (int i = 0, j = 0; i < length; i = i + 3, j = j + 8)
+                {
+                    target[j] = _characters[(byte)(source[i] >> 2)];
+                    target[j + 2] = _characters[(byte)(source[i] << 4) | (byte)(source[i + 1] >> 4)];
+                    target[j + 4] = _characters[(byte)(source[i + 1] << 2) | (byte)(source[i + 2] >> 6)];
+                    target[j + 6] = _characters[(byte)source[i + 2]];
+                }
             }
         }
 
