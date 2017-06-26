@@ -2,6 +2,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Running;
@@ -13,7 +14,7 @@ namespace PerfForFunz
     public class Base64EncodingBenchmarks
     {
         private readonly byte[] _data;
-        private readonly Base64Encoder _myEncoder = new Base64Encoder('-', '_');
+        private readonly Base64Encoder _myEncoder = new Base64Encoder('+', '/', '=');
         public Base64EncodingBenchmarks()
         {
             var rnd = System.Security.Cryptography.RandomNumberGenerator.Create();
@@ -21,11 +22,18 @@ namespace PerfForFunz
             rnd.GetBytes(_data);
         }
 
+        // [Benchmark(Baseline = true)]
+        // public string CurrentAspNetCore()
+        // {
+        //     return Base64UrlTextEncoder.Encode(_data);
+        // }
+
         [Benchmark(Baseline = true)]
-        public string CurrentAspNetCore()
+        public string DotnetCoreImplementation()
         {
-            return Base64UrlTextEncoder.Encode(_data);
+            return Convert.ToBase64String(_data);
         }
+
 
         [Benchmark]
         public string MySuperAwesomeImplementation()
@@ -194,6 +202,7 @@ namespace PerfForFunz
             return result;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private unsafe void EncodeFinal(byte[] sourceBuffer, int start, int length, byte* targetBuffer, int targetStart)
         {
             var remainingBytes = length % 3;
@@ -228,19 +237,23 @@ namespace PerfForFunz
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private unsafe void EncodeBlock(byte[] sourceBuffer, int start, int length, byte* targetBuffer, int targetStart)
         {
             var target = targetBuffer + targetStart;
             Debug.Assert(target[0] == 0);
             fixed (byte* sourceFixed = sourceBuffer)
             {
-                var source = sourceFixed + start;
-                for (int i = 0, j = 0; i < length; i = i + 3, j = j + 8)
+                fixed (byte* characters = _characters)
                 {
-                    target[j] = _characters[(byte)(source[i] >> 2)];
-                    target[j + 2] = _characters[(byte)(source[i] << 4) | (byte)(source[i + 1] >> 4)];
-                    target[j + 4] = _characters[(byte)(source[i + 1] << 2) | (byte)(source[i + 2] >> 6)];
-                    target[j + 6] = _characters[(byte)source[i + 2]];
+                    var source = sourceFixed + start;
+                    for (int i = 0, j = 0; i < length; i = i + 3, j = j + 8)
+                    {
+                        target[j] = _characters[(byte)(source[i] >> 2)];
+                        target[j + 2] = _characters[(byte)(source[i] << 4) | (byte)(source[i + 1] >> 4)];
+                        target[j + 4] = _characters[(byte)(source[i + 1] << 2) | (byte)(source[i + 2] >> 6)];
+                        target[j + 6] = _characters[(byte)source[i + 2]];
+                    }
                 }
             }
         }
