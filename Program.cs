@@ -47,38 +47,41 @@ namespace PerfForFunz
     {
         unsafe static void Main(string[] args)
         {
-            // var str = "hello world";
-            // fixed (char* hptr = str)
-            // {
-            //     var bytePtr = (byte*)hptr;
-            //     var byteCount = UnicodeEncoding.Unicode.GetByteCount(hptr, str.Length);
-            //     for (var i = 0; i < byteCount; i++)
-            //     {
-            //         Console.Write($"'{bytePtr[i]}', ");
-            //     }
-            // }
+            var str = "hello world";
+            fixed (char* hptr = str)
+            {
+                var bytePtr = (byte*)hptr;
+                var byteCount = UnicodeEncoding.Unicode.GetByteCount(hptr, str.Length);
+                for (var i = 0; i < byteCount; i++)
+                {
+                    Console.Write($"'{bytePtr[i]}', ");
+                }
+            }
 
-            // var base64Encoder = new Base64Encoder('+', '/', '=');
-            // Console.WriteLine(base64Encoder.Encode(new string('a', 1024)));
-            // Console.WriteLine(base64Encoder.Encode("aaa"));
-            // Console.WriteLine(base64Encoder.Encode("aaaa"));
-            // Console.WriteLine(base64Encoder.Encode("aaaaa"));
-            // Console.WriteLine(base64Encoder.Encode(new string('a', 2048)));
+            var base64Encoder = new Base64Encoder('+', '/', '=');
+            Console.WriteLine(base64Encoder.Encode(new string('a', 1024)));
+            Console.WriteLine(base64Encoder.Encode("aaa"));
+            Console.WriteLine(base64Encoder.Encode("aaaa"));
+            Console.WriteLine(base64Encoder.Encode("aaaaa"));
+            Console.WriteLine(base64Encoder.Encode(new string('a', 2048)));
 
-            // var base64UrlEncoder = new Base64Encoder('-', '_');
-            // Console.WriteLine(base64UrlEncoder.Encode("hello world"));
-            // Console.WriteLine(base64UrlEncoder.Encode("aaa"));
-            // Console.WriteLine(base64UrlEncoder.Encode("aaaa"));
-            // Console.WriteLine(base64UrlEncoder.Encode("aaaaa"));
+            var base64UrlEncoder = new Base64Encoder('-', '_');
+            Console.WriteLine(base64UrlEncoder.Encode("hello world"));
+            Console.WriteLine(base64UrlEncoder.Encode("aaa"));
+            Console.WriteLine(base64UrlEncoder.Encode("aaaa"));
+            Console.WriteLine(base64UrlEncoder.Encode("aaaaa"));
 
-            // Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("hello world")));
-            // Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("aaa")));
-            // Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("aaaa")));
-            // Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("aaaaa")));
+            Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("hello world")));
+            Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("aaa")));
+            Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("aaaa")));
+            Console.WriteLine(base64Encoder.Decode(base64Encoder.Encode("aaaaa")));
 
-            // Console.WriteLine("Hello World!");
+            Console.WriteLine("Hello World!");
 
-            var summary = BenchmarkRunner.Run<Base64EncodingBenchmarks>();
+            if (args.Length > 1 && args[1] == "--perf")
+            {
+                var summary = BenchmarkRunner.Run<Base64EncodingBenchmarks>();
+            }
         }
     }
 
@@ -91,11 +94,6 @@ namespace PerfForFunz
 
         public const int SourceBlockBytes = 3;
         public const int TargetBlockBytes = 4;
-
-        public static Vector<int> mask0 = new Vector<int>(0b00111111_00000000_00000000_00000000);
-        public static Vector<int> mask1 = new Vector<int>(0b00000000_00111111_00000000_00000000);
-        public static Vector<int> mask2 = new Vector<int>(0b00000000_00000000_00111111_00000000);
-        public static Vector<int> mask3 = new Vector<int>(0b00000000_00000000_00000000_00111111);
 
         public Base64Encoder(char character62, char character63, char padding = default(char))
         {
@@ -286,80 +284,131 @@ namespace PerfForFunz
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private unsafe void EncodeBlock(byte* sourceBuffer, int length, byte* targetBuffer)
         {
-            var target = (short*)targetBuffer;
-            Debug.Assert(target[0] == 0);
-            var numberOfFullBlocks = length / (SourceBlockBytes * Vector<int>.Count);
-            var fullBlocksLength = numberOfFullBlocks * SourceBlockBytes * Vector<int>.Count;
-            ComputeBlock(sourceBuffer, fullBlocksLength, targetBuffer);
-
-            sourceBuffer = sourceBuffer + fullBlocksLength;
-            target = target + fullBlocksLength / SourceBlockBytes * TargetBlockBytes;
-
-            var remaining = length - fullBlocksLength;
             fixed (short* characters = _characters)
             {
-                for (var i = 0; i < remaining; i = i + 3)
+                var target = (short*)targetBuffer;
+                Debug.Assert(target[0] == 0);
+                if (Vector.IsHardwareAccelerated)
                 {
-                    *target++ = _characters[(byte)(sourceBuffer[i] >> 2)];
-                    *target++ = _characters[(byte)(sourceBuffer[i] << 4) | (byte)(sourceBuffer[i + 1] >> 4)];
-                    *target++ = _characters[(byte)(sourceBuffer[i + 1] << 2) | (byte)(sourceBuffer[i + 2] >> 6)];
-                    *target++ = _characters[(byte)sourceBuffer[i + 2]];
+                    var numberOfFullBlocks = length / (SourceBlockBytes * Vector<int>.Count);
+                    var fullBlocksLength = numberOfFullBlocks * SourceBlockBytes * Vector<int>.Count;
+                    var targetLength = length / SourceBlockBytes * TargetBlockBytes;
+                    var blockLength = Vector<int>.Count * sizeof(int);
+                    var tmp = stackalloc byte[blockLength];
+                    var passes = targetLength / blockLength;
+
+                    var tmpCursor = tmp;
+                    var srcCursor = sourceBuffer + SourceBlockBytes - 1;
+                    var dstCursor = (short*)targetBuffer;
+
+                    for (int i = 0; i < passes; i++, tmpCursor = tmp)
+                    {
+                        const int blockStep = SourceBlockBytes * 2;
+                        for (var j = 0; j < blockLength; j = j + TargetBlockBytes)
+                        {
+                            *tmpCursor++ = *srcCursor--;
+                            *tmpCursor++ = *srcCursor--;
+                            *tmpCursor++ = *srcCursor--;
+                            tmpCursor++;
+                            srcCursor = srcCursor + blockStep;
+                        }
+
+                        var initMem = Unsafe.Read<Vector<int>>(tmp);
+                        var result = initMem * 64 & new Vector<int>(0b00111111_00000000_00000000_00000000);
+                        result = result | initMem * 16 & new Vector<int>(0b00000000_00111111_00000000_00000000);
+                        result = result | initMem * 4 & new Vector<int>(0b00000000_00000000_00111111_00000000);
+                        result = result | initMem & new Vector<int>(0b00000000_00000000_00000000_00111111);
+                        Unsafe.Write(tmp, result);
+
+                        tmpCursor = tmp + TargetBlockBytes - 1;
+
+                        const int destinationStep = TargetBlockBytes * 2;
+
+                        for (var j = 0; j < blockLength; j = j + TargetBlockBytes)
+                        {
+                            *dstCursor++ = characters[*tmpCursor--];
+                            *dstCursor++ = characters[*tmpCursor--];
+                            *dstCursor++ = characters[*tmpCursor--];
+                            *dstCursor++ = characters[*tmpCursor--];
+                            tmpCursor = tmpCursor + destinationStep;
+                        }
+                    }
+
+                    sourceBuffer = sourceBuffer + fullBlocksLength;
+                    target = target + fullBlocksLength / SourceBlockBytes * TargetBlockBytes;
+
+                    var remaining = length - fullBlocksLength;
+                    for (var i = 0; i < remaining; i = i + 3)
+                    {
+                        *target++ = characters[(byte)(sourceBuffer[i] >> 2)];
+                        *target++ = characters[(byte)(sourceBuffer[i] << 4) | (byte)(sourceBuffer[i + 1] >> 4)];
+                        *target++ = characters[(byte)(sourceBuffer[i + 1] << 2) | (byte)(sourceBuffer[i + 2] >> 6)];
+                        *target++ = characters[(byte)sourceBuffer[i + 2]];
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < length; i = i + 3)
+                    {
+                        *target++ = characters[(byte)(sourceBuffer[i] >> 2)];
+                        *target++ = characters[(byte)(sourceBuffer[i] << 4) | (byte)(sourceBuffer[i + 1] >> 4)];
+                        *target++ = characters[(byte)(sourceBuffer[i + 1] << 2) | (byte)(sourceBuffer[i + 2] >> 6)];
+                        *target++ = characters[(byte)sourceBuffer[i + 2]];
+                    }
                 }
             }
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private unsafe void ComputeBlock(byte* source, int sourceLength, byte* destination)
-        {
-            Debug.Assert(sourceLength % (SourceBlockBytes * Vector<int>.Count) == 0);
+        //[MethodImpl(MethodImplOptions.AggressiveInlining)]
+        //private unsafe void ComputeBlock(byte* source, int sourceLength, byte* destination)
+        //{
+        //    Debug.Assert(sourceLength % (SourceBlockBytes * Vector<int>.Count) == 0);
 
-            var targetLength = sourceLength / SourceBlockBytes * TargetBlockBytes;
-            var blockLength = Vector<int>.Count * sizeof(int);
-            var tmp = stackalloc byte[blockLength];
-            var passes = targetLength / blockLength;
+        //    var targetLength = sourceLength / SourceBlockBytes * TargetBlockBytes;
+        //    var blockLength = Vector<int>.Count * sizeof(int);
+        //    var tmp = stackalloc byte[blockLength];
+        //    var passes = targetLength / blockLength;
 
-            var tmpCursor = tmp;
-            var srcCursor = source + SourceBlockBytes - 1;
-            var dstCursor = (short*)destination;
+        //    var tmpCursor = tmp;
+        //    var srcCursor = source + SourceBlockBytes - 1;
+        //    var dstCursor = (short*)destination;
 
-            fixed (short* characters = _characters)
-            {
-                for (int i = 0; i < passes; i++, tmpCursor = tmp)
-                {
-                    const int blockStep = SourceBlockBytes * 2;
-                    for (var j = 0; j < blockLength; j = j + TargetBlockBytes)
-                    {
-                        *tmpCursor++ = *srcCursor--;
-                        *tmpCursor++ = *srcCursor--;
-                        *tmpCursor++ = *srcCursor--;
-                        tmpCursor++;
-                        srcCursor = srcCursor + blockStep;
-                    }
+        //    fixed (short* characters = _characters)
+        //    {
+        //        for (int i = 0; i < passes; i++, tmpCursor = tmp)
+        //        {
+        //            const int blockStep = SourceBlockBytes * 2;
+        //            for (var j = 0; j < blockLength; j = j + TargetBlockBytes)
+        //            {
+        //                *tmpCursor++ = *srcCursor--;
+        //                *tmpCursor++ = *srcCursor--;
+        //                *tmpCursor++ = *srcCursor--;
+        //                tmpCursor++;
+        //                srcCursor = srcCursor + blockStep;
+        //            }
 
-                    var initMem = Unsafe.Read<Vector<int>>(tmp);
-                    var result = initMem * 64 & mask0;
-                    var tmpVect = initMem * 16 & mask1;
-                    result = result | tmpVect;
-                    tmpVect = initMem * 4 & mask2;
-                    result = result | tmpVect;
-                    result = result | initMem & mask3;
-                    Unsafe.Write(tmp, result);
+        //            var initMem = Unsafe.Read<Vector<int>>(tmp);
+        //            var result = initMem * 64 & mask0;
+        //            result = result | initMem * 16 & mask1;
+        //            result = result | initMem * 4 & mask2;
+        //            result = result | initMem & mask3;
+        //            Unsafe.Write(tmp, result);
 
-                    tmpCursor = tmp + TargetBlockBytes - 1;
+        //            tmpCursor = tmp + TargetBlockBytes - 1;
 
-                    const int destinationStep = TargetBlockBytes * 2;
+        //            const int destinationStep = TargetBlockBytes * 2;
 
-                    for (var j = 0; j < blockLength; j = j + TargetBlockBytes)
-                    {
-                        *dstCursor++ = characters[*tmpCursor--];
-                        *dstCursor++ = characters[*tmpCursor--];
-                        *dstCursor++ = characters[*tmpCursor--];
-                        *dstCursor++ = characters[*tmpCursor--];
-                        tmpCursor = tmpCursor + destinationStep;
-                    }
-                }
-            }
-        }
+        //            for (var j = 0; j < blockLength; j = j + TargetBlockBytes)
+        //            {
+        //                *dstCursor++ = characters[*tmpCursor--];
+        //                *dstCursor++ = characters[*tmpCursor--];
+        //                *dstCursor++ = characters[*tmpCursor--];
+        //                *dstCursor++ = characters[*tmpCursor--];
+        //                tmpCursor = tmpCursor + destinationStep;
+        //            }
+        //        }
+        //    }
+        //}
 
         public string Decode(string encoded)
         {
